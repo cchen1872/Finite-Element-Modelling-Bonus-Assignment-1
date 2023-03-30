@@ -7,6 +7,13 @@ SUPPORT_TYPES = {
     "FIXED": 3
 }
 
+SUPPORT_TYPES_KEYS = {
+    0: "SUPPORTLESS",
+    1: "ROLLER",
+    2: "PIN",
+    3: "FIXED"
+}
+
 class Force:
     def __init__(self, node, x, y, z):
         self.node = node
@@ -15,14 +22,14 @@ class Force:
 class Node:
     def __init__(self, id, x, y, z, forces, support_type):
         self.id = id
-        self.dim = (x, y, z)
+        self.location = (x, y, z)
         self.forces = forces
         self.support_type = support_type
 
 class Beam:
-    def __init__(self, id, E, end_nodes, area):
+    def __init__(self, id, elasticity, end_nodes, area):
         self.id = id
-        self.E = E
+        self.elasticity = elasticity
         self.end_nodes = end_nodes
         self.area = area
 
@@ -76,7 +83,20 @@ def readNode(f):
     for force in force_dims:
         forces.append(Force(id, *force))
     return Node(id, *dimensions, forces, support_type)
-              
+
+def printNode(node):
+    print("NODE:")
+    print(f"id: {node.id}")
+    print(f"location: {node.location[0]}, {node.location[1]}, {node.location[2]}")
+    for force in node.forces:
+        print(f"Force: <{force.magnitudes[0]}, {force.magnitudes[1]}, {force.magnitudes[2]}>")
+    print(f"Support: {SUPPORT_TYPES_KEYS[node.support_type]}\n")
+def printBeam(beam):
+    print("BEAM:")
+    print(f"id: {beam.id}")
+    print(f"nodes: {beam.end_nodes[0]} <-> {beam.end_nodes[1]}")
+    print(f"elasticity: {beam.elasticity} Pa")
+    print(f"area: {beam.area} m^2", end = '\n\n')
 def main():
     if len(sys.argv) < 2:
         raise Exception("Did not provide input file")
@@ -105,7 +125,9 @@ def main():
         while s == "\n":
             s = f.readline()
         s = s.strip()
-    print(len(nodes))
-    print(len(beams))
+    for node in nodes:
+        printNode(node)
+    for beam in beams:
+        printBeam(beam)
 
 main()
