@@ -1,4 +1,5 @@
 import sys
+import numpy as np
 from solve import solve
 
 SUPPORT_TYPES = {
@@ -21,11 +22,17 @@ class Force:
         self.magnitudes = (x, y, z)
 
 class Node:
-    def __init__(self, id, x, y, z, forces, support_type):
+    def __init__(self, id, x, y, z, forces, support_type, roller_normal = None):
         self.id = id
         self.location = (x, y, z)
         self.forces = forces
         self.support_type = support_type
+        if self.support_type == SUPPORT_TYPES["ROLLER"]:
+            print(roller_normal)
+            orthoganal1 = [-roller_normal[1], roller_normal[0], 0]
+            orthoganal2 = np.cross(roller_normal, orthoganal1)
+            self.roller_coord = np.array([roller_normal, orthoganal1, orthoganal2])
+            print(self.roller_coord)
 
 class Bar:
     def __init__(self, id, elasticity, area, end_nodes):
@@ -77,6 +84,7 @@ def readNode(f):
     support_type = SUPPORT_TYPES["SUPPORTLESS"]
     dimensions = None
     id = None
+    roller_normal = None
     while s != "END_NODE":
         if s == "ID:":
             id = int(f.readline().strip())
@@ -86,23 +94,27 @@ def readNode(f):
             support_type = SUPPORT_TYPES[f.readline().strip()]
         elif s == "FORCE:":
             force_dims.append([float(x) for x in f.readline().strip().split(',')])
+        elif s == "ROLLER_NORMAL:":
+            roller_normal = [float(x) for x in f.readline().strip().split(',')]
         else:
             raise Exception("Invalid Node Input")
         
         s = f.readline().strip()
-    if id is None or dimensions is None:
+    # print(id, dimensions, support_type, roller_normal)
+    if id is None or dimensions is None or \
+          support_type==SUPPORT_TYPES["ROLLER"] and roller_normal is None:
         raise Exception("Insufficient Node Fields")
     forces = []
     for force in force_dims:
         forces.append(Force(id, *force))
-    return Node(id, *dimensions, forces, support_type)
+    return Node(id, *dimensions, forces, support_type, roller_normal)
 
 def connectBarNodes(bars, nodes):
     for bar in bars.values():
         if bar.end_nodes is None:
             bar.end_nodes = [nodes[id] for id in bar.end_node_ids]
     
-def saveBarLength(bar):
+def setBarLength(bar):
     res = 0
     for coord in range(3):
         res += (bar.end_nodes[0].location[coord] - bar.end_nodes[1].location[coord]) ** 2
@@ -110,14 +122,17 @@ def saveBarLength(bar):
     bar.length = res
     return res
 
-def saveCosines(bar):
+def setCosines(bar):
     if bar.length is None:
-        saveBarLength(bar)
+        setBarLength(bar)
     
     bar.cosines = []
     for i in range(3):
         bar.cosines.append((bar.end_nodes[0].location[i] - bar.end_nodes[1].location[i])/bar.length)
     # print(bar.cosines, bar.id)
+
+def setDeflectionBoundary(node):
+    pass
 
 def printNode(node):
     print("NODE:")
@@ -125,7 +140,11 @@ def printNode(node):
     print(f"location: {node.location[0]}, {node.location[1]}, {node.location[2]}")
     for force in node.forces:
         print(f"Force: <{force.magnitudes[0]}, {force.magnitudes[1]}, {force.magnitudes[2]}>")
-    print(f"Support: {SUPPORT_TYPES_KEYS[node.support_type]}\n")
+    print(f"Support: {SUPPORT_TYPES_KEYS[node.support_type]}")
+    if node.support_type == SUPPORT_TYPES["ROLLER"]:
+        print(f"coordinate vectors: \n{node.roller_coord}")
+    else:
+        print()
 def printBar(bar):
     print("Bar:")
     print(f"id: {bar.id}")
@@ -167,7 +186,7 @@ def main():
         s = s.strip()
     connectBarNodes(bars, nodes)
     for bar in bars.values():
-        saveCosines(bar)
+        setCosines(bar)
     for node in nodes.values():
         printNode(node)
     for bar in bars.values():
