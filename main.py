@@ -1,55 +1,9 @@
 import sys
 import numpy as np
-from solve import solve
+from elements import Bar, Node
+from elements import SUPPORT_TYPES, SUPPORT_TYPES_KEYS
 
-SUPPORT_TYPES = {
-    "SUPPORTLESS": 0,
-    "ROLLER": 1,
-    "PIN": 2,
-    "FIXED": 3
-}
-
-SUPPORT_TYPES_KEYS = {
-    0: "SUPPORTLESS",
-    1: "ROLLER",
-    2: "PIN",
-    3: "FIXED"
-}
-
-class Force:
-    def __init__(self, node, x, y, z):
-        self.node = node
-        self.magnitudes = (x, y, z)
-
-class Node:
-    def __init__(self, id, x, y, z, forces, support_type, roller_normal = None):
-        self.id = id
-        self.location = (x, y, z)
-        self.forces = forces
-        self.support_type = support_type
-        if self.support_type == SUPPORT_TYPES["ROLLER"]:
-            print(roller_normal)
-            orthoganal1 = [-roller_normal[1], roller_normal[0], 0]
-            orthoganal2 = np.cross(roller_normal, orthoganal1)
-            self.roller_coord = np.array([roller_normal, orthoganal1, orthoganal2])
-            print(self.roller_coord)
-
-class Bar:
-    def __init__(self, id, elasticity, area, end_nodes):
-        self.id = id
-        self.elasticity = elasticity
-        self.area = area
-        if type(end_nodes[0]) == type(int()):
-            self.end_node_ids = end_nodes
-            self.end_nodes = None
-        else:
-            self.end_nodes_ids = None
-            self.end_nodes = end_nodes
-        self.length = None
-        self.cosines = None
-
-
-
+ORIGIN_NODE = Node(-1, 0, 0, 0, None, None)
 
 def readBar(f):
     s = f.readline().strip()
@@ -58,10 +12,8 @@ def readBar(f):
     nodes = []
     id = None
     while s != "END_BAR":
-        print(s, s == "END_BAR")
         if s == "ID:":
             id = int(f.readline().strip())
-            print(id)
         elif s == "ELASTICITY:":
             elasticity = float(f.readline().strip())
         elif s == "AREA:":  
@@ -73,14 +25,13 @@ def readBar(f):
             raise Exception("Invalid Bar Input")
         
         s = f.readline().strip()
-    print("DONE")
     if len(nodes) != 2 or any([x is None for x in [elasticity, area, id]]):
         raise Exception("Insufficient Node Fields")
     return Bar(id, elasticity, area, nodes)
 
 def readNode(f):
     s = f.readline().strip()
-    force_dims = []
+    force_dims = None
     support_type = SUPPORT_TYPES["SUPPORTLESS"]
     dimensions = None
     id = None
@@ -93,66 +44,163 @@ def readNode(f):
         elif s == "SUPPORT_TYPE:":  
             support_type = SUPPORT_TYPES[f.readline().strip()]
         elif s == "FORCE:":
-            force_dims.append([float(x) for x in f.readline().strip().split(',')])
+            force_dims = [float(x) for x in f.readline().strip().split(',')]
         elif s == "ROLLER_NORMAL:":
-            roller_normal = [float(x) for x in f.readline().strip().split(',')]
+            roller_normal = f.readline().strip()
         else:
             raise Exception("Invalid Node Input")
         
         s = f.readline().strip()
-    # print(id, dimensions, support_type, roller_normal)
     if id is None or dimensions is None or \
           support_type==SUPPORT_TYPES["ROLLER"] and roller_normal is None:
         raise Exception("Insufficient Node Fields")
-    forces = []
-    for force in force_dims:
-        forces.append(Force(id, *force))
-    return Node(id, *dimensions, forces, support_type, roller_normal)
+    
+    return Node(id, *dimensions, force_dims, support_type, roller_normal)
 
 def connectBarNodes(bars, nodes):
+    all_nodes = set()
+
+    for node_id in nodes:
+        all_nodes.add(node_id)
+
     for bar in bars.values():
         if bar.end_nodes is None:
             bar.end_nodes = [nodes[id] for id in bar.end_node_ids]
+            for id in bar.end_node_ids:
+                if id in all_nodes:
+                    all_nodes.remove(id)
+        else:
+            for node in bar.end_nodes:
+                if node.id in all_nodes:
+                    all_nodes.remove(node.id)
     
-def setBarLength(bar):
+    for id in all_nodes:
+        del nodes[id]
+    
+           
+
+    
+def getNodeDistance(node1, node2):
     res = 0
     for coord in range(3):
-        res += (bar.end_nodes[0].location[coord] - bar.end_nodes[1].location[coord]) ** 2
+        res += (node1.location[coord] - node2.location[coord]) ** 2
     res **= 0.5
-    bar.length = res
     return res
 
 def setCosines(bar):
     if bar.length is None:
-        setBarLength(bar)
+        bar.length = getNodeDistance(*bar.end_nodes)
     
     bar.cosines = []
     for i in range(3):
         bar.cosines.append((bar.end_nodes[0].location[i] - bar.end_nodes[1].location[i])/bar.length)
-    # print(bar.cosines, bar.id)
+    
+def findBoundaryConditions(node):
+    if node.support_type >= SUPPORT_TYPES["PIN"]:
+        return 0
+    elif node.support_type == SUPPORT_TYPES["ROLLER"]:
+        return 1
+    else:
+        return 2
 
-def setDeflectionBoundary(node):
-    pass
+def getRollerRow(K, node):
+    node_idx = node.id
+    dim_size = node.roller_coord.shape[1]
+    zeroes = np.zeros((K.shape[1]))
+    for i in range(dim_size):
+        if np.array_equal(K[3*node_idx + i,:],zeroes) and node.roller_coord[0,i] != 0:
+            return 3 * node_idx + i
+    
+    for i in range(dim_size):
+        if node.roller_coord[0,i] != 0:
+            return 3 * node_idx + dim_size - 1
+    raise Exception("Roller Normal Vector set to zero vector")
+
+def trimKF(K, F, kept_rows):
+    K_bc = K
+    F_bc = F
+    kept_rows = {kept_rows[i]:kept_rows[i] for i in range(len(kept_rows))}
+    while True:
+        new_K = K_bc
+        new_F = F_bc
+        K_bc = np.zeros((len(kept_rows), len(kept_rows)))
+        F_bc = np.zeros((len(kept_rows), 1))
+        idx = 0
+        for row in kept_rows:
+            x = np.array([new_K[row,r] for r in kept_rows])
+            K_bc[idx,:] = x
+            F_bc[idx,0] = new_F[row,0]
+            idx += 1
+        
+        zeroes_h = np.zeros(len(kept_rows))
+        new_kept_rows = {}
+        idx = 0
+        for row in kept_rows:
+            if not np.array_equal(K_bc[idx,:], zeroes_h) and \
+                    not np.array_equal(K_bc[:,idx], zeroes_h):
+                new_kept_rows[idx] = kept_rows[row]
+                print(K_bc[:, idx])
+            idx += 1
+        if len(kept_rows) == len(new_kept_rows):
+            return K_bc, F_bc, sorted([elem for elem in kept_rows.values()])
+        else:
+            kept_rows = new_kept_rows
+        
+
+def getKF(nodes, lambda_matricies):
+    K = np.zeros((3*len(nodes), 3*len(nodes)))
+    for node1, node2, lambda_matrix in lambda_matricies:
+        starts = [3*node1, 3*node2]
+        for i in range(len(starts)):
+            for j in range(len(starts)):
+                if i + j == 1:
+                    K[starts[i]:starts[i] + 3, starts[j]:starts[j]+3] -= lambda_matrix
+                else:
+                    K[starts[i]:starts[i] + 3, starts[j]:starts[j]+3] += lambda_matrix
+    
+    F = np.zeros((3*len(nodes), 1))
+    for i in range(len(nodes)):
+        if nodes[i].forces is not None:
+            for j in range(len(nodes[i].forces)):
+                F[3*i + j,0] = nodes[i].forces[j]
+
+    kept_rows = []
+    for i in range(len(nodes)):
+        bcs = findBoundaryConditions(nodes[i])
+        if bcs == 1:
+            roller_row = 3 * i + nodes[i].roller_move
+            kept_rows.append(roller_row)     
+        elif bcs >= 2:
+            for j in range(len(nodes[i].location)):
+                kept_rows.append(3*i + j)
+
+    return K, F, kept_rows
+
+def getStress(bar):
+    n_dim = len(bar.end_nodes[0].location)
+    d = np.zeros((n_dim * 2, 1))
+    C = np.zeros((1, n_dim*2))
+    sign = (1, -1)
+    for i in range(len(bar.end_nodes)):
+        d[(3*i):(3*i + n_dim)] = bar.end_nodes[i].displacement
+        C[0,(3*i):(3*i + n_dim)] = sign[i] * np.array(bar.cosines)
+    return bar.elasticity / bar.length * np.matmul(C, d)[0,0]
+    
+    
 
 def printNode(node):
     print("NODE:")
     print(f"id: {node.id}")
     print(f"location: {node.location[0]}, {node.location[1]}, {node.location[2]}")
-    for force in node.forces:
-        print(f"Force: <{force.magnitudes[0]}, {force.magnitudes[1]}, {force.magnitudes[2]}>")
     print(f"Support: {SUPPORT_TYPES_KEYS[node.support_type]}")
-    if node.support_type == SUPPORT_TYPES["ROLLER"]:
-        print(f"coordinate vectors: \n{node.roller_coord}")
-    else:
-        print()
+    print(f"Displacement: \n{node.displacement}")
+    print(f"Forces: {node.final_forces}\n")
+
 def printBar(bar):
     print("Bar:")
     print(f"id: {bar.id}")
     print(f"nodes: {bar.end_nodes[0].id} <-> {bar.end_nodes[1].id}")
-    print(f"elasticity: {bar.elasticity} Pa")
-    print(f"area: {bar.area} m^2")
-    print(f"length: {bar.length} m")
-    print(f"cosines: {bar.cosines}")
+    print(f"stress: \n{bar.stress}\n")
 
 def main():
     if len(sys.argv) < 2:
@@ -167,7 +215,6 @@ def main():
     nodes = {}
     bars = {}
     while s != "":
-        # print(s, end = 'KLSFJKSDLFJSKL\n')
         if s == "\n":
             continue
         elif s == "NODE:":
@@ -177,22 +224,72 @@ def main():
             new_bar = readBar(f)
             bars[new_bar.id] = new_bar
         else:
-            print(s)
-            print(ord(s[-1]))
             raise Exception("Invalid Input")
         s = f.readline()
         while s == "\n":
             s = f.readline()
         s = s.strip()
+    
     connectBarNodes(bars, nodes)
-    for bar in bars.values():
+
+    nodes = [node for node in nodes.values()]
+    bars = [bar for bar in bars.values()]
+
+    for i in range(len(nodes)):
+        nodes[i].id = i
+
+    for i in range(len(bars)):
+        bars[i].id = i
+
+
+    lambda_matricies = []
+    for bar in bars:
         setCosines(bar)
-    for node in nodes.values():
+        EAL = bar.elasticity * bar.area / bar.length
+        new_lambda = EAL * np.array([[bar.cosines[i]*bar.cosines[j] \
+         for j in range(len(bar.cosines))] for i in range(len(bar.cosines))])
+
+        lambda_matricies.append((bar.end_nodes[0].id, bar.end_nodes[1].id, new_lambda))
+
+    K, F, d_rows = getKF(nodes, lambda_matricies)
+    K_bc, F_bc, d_rows = trimKF(K, F, d_rows)
+    print(K_bc, F_bc)
+    d = np.linalg.solve(K_bc, F_bc)
+    full_d = np.zeros((K.shape[0],1))
+
+    d_idx = 0
+    for i in range(len(nodes)):
+        if d_idx >= len(d_rows):
+            break
+        for j in range(len(nodes[i].location)):
+            if d_rows[d_idx] == 3 * i + j:
+                full_d[3*i+j,0] = d[d_idx,0]
+                nodes[i].displacement[j,0] = d[d_idx,0]
+                d_idx += 1
+                if d_idx >= len(d_rows):
+                    break
+    print(full_d)
+    full_f = np.matmul(K,full_d)
+    print(full_f)
+    for i in range(len(nodes)):
+        nodes[i].final_forces = full_f[3*i:3*i+3,0]
+    for bar in bars:
+        sigma = getStress(bar)
+        bar.stress = sigma
+    
+    for bar in bars:
+        print(bar.stress)
+    for node in nodes:
         printNode(node)
-    for bar in bars.values():
-        print(bar)
+        # print(node.displacement)  
+
+    for bar in bars:
         printBar(bar)
 
-    solve(nodes, bars)
 
 main()
+
+
+
+# K = [lambda, -lambda,
+#      -lambda, lambda]
