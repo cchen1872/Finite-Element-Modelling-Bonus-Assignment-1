@@ -5,6 +5,7 @@ from elements import SUPPORT_TYPES, SUPPORT_TYPES_KEYS
 
 ORIGIN_NODE = Node(-1, 0, 0, 0, None, None)
 
+# Input for Bar Object
 def readBar(f):
     s = f.readline().strip()
     elasticity = None
@@ -29,13 +30,14 @@ def readBar(f):
         raise Exception("Insufficient Node Fields")
     return Bar(id, elasticity, area, nodes)
 
+# Input for Node Object
 def readNode(f):
     s = f.readline().strip()
     force_dims = None
     support_type = SUPPORT_TYPES["SUPPORTLESS"]
     dimensions = None
     id = None
-    roller_normal = None
+    roller_direction = None
     while s != "END_NODE":
         if s == "ID:":
             id = int(f.readline().strip())
@@ -45,18 +47,19 @@ def readNode(f):
             support_type = SUPPORT_TYPES[f.readline().strip()]
         elif s == "FORCE:":
             force_dims = [float(x) for x in f.readline().strip().split(',')]
-        elif s == "ROLLER_NORMAL:":
-            roller_normal = f.readline().strip()
+        elif s == "ROLLER_DIRECTION:":
+            roller_direction = f.readline().strip()
         else:
             raise Exception("Invalid Node Input")
         
         s = f.readline().strip()
     if id is None or dimensions is None or \
-          support_type==SUPPORT_TYPES["ROLLER"] and roller_normal is None:
+          support_type==SUPPORT_TYPES["ROLLER"] and roller_direction is None:
         raise Exception("Insufficient Node Fields")
     
-    return Node(id, *dimensions, force_dims, support_type, roller_normal)
+    return Node(id, *dimensions, force_dims, support_type, roller_direction)
 
+# Looks at all bars and encapsulates the corresponding nodes into the bar objects
 def connectBarNodes(bars, nodes):
     all_nodes = set()
 
@@ -77,9 +80,7 @@ def connectBarNodes(bars, nodes):
     for id in all_nodes:
         del nodes[id]
     
-           
-
-    
+# Uses x^2+y^2+z^2 = d^2 to find distance between two points in 3D space
 def getNodeDistance(node1, node2):
     res = 0
     for coord in range(3):
@@ -87,6 +88,9 @@ def getNodeDistance(node1, node2):
     res **= 0.5
     return res
 
+
+# sets the bar object's cosine field
+# cosines = Dx/L,Dy/L,Dz/L
 def setCosines(bar):
     if bar.length is None:
         bar.length = getNodeDistance(*bar.end_nodes)
@@ -95,6 +99,7 @@ def setCosines(bar):
     for i in range(3):
         bar.cosines.append((bar.end_nodes[0].location[i] - bar.end_nodes[1].location[i])/bar.length)
     
+# Helps signify type of boundary condition node should undergo
 def findBoundaryConditions(node):
     if node.support_type >= SUPPORT_TYPES["PIN"]:
         return 0
@@ -103,19 +108,8 @@ def findBoundaryConditions(node):
     else:
         return 2
 
-def getRollerRow(K, node):
-    node_idx = node.id
-    dim_size = node.roller_coord.shape[1]
-    zeroes = np.zeros((K.shape[1]))
-    for i in range(dim_size):
-        if np.array_equal(K[3*node_idx + i,:],zeroes) and node.roller_coord[0,i] != 0:
-            return 3 * node_idx + i
-    
-    for i in range(dim_size):
-        if node.roller_coord[0,i] != 0:
-            return 3 * node_idx + dim_size - 1
-    raise Exception("Roller Normal Vector set to zero vector")
-
+# Applies boundary conditions to K and F
+# Also removes rows/columns that are all zero in K
 def trimKF(K, F, kept_rows):
     K_bc = K
     F_bc = F
@@ -139,14 +133,14 @@ def trimKF(K, F, kept_rows):
             if not np.array_equal(K_bc[idx,:], zeroes_h) and \
                     not np.array_equal(K_bc[:,idx], zeroes_h):
                 new_kept_rows[idx] = kept_rows[row]
-                print(K_bc[:, idx])
             idx += 1
         if len(kept_rows) == len(new_kept_rows):
             return K_bc, F_bc, sorted([elem for elem in kept_rows.values()])
         else:
             kept_rows = new_kept_rows
         
-
+# Finds the total K before boudnary conditions by adding each
+# bar's lambda matrix
 def getKF(nodes, lambda_matricies):
     K = np.zeros((3*len(nodes), 3*len(nodes)))
     for node1, node2, lambda_matrix in lambda_matricies:
@@ -176,6 +170,8 @@ def getKF(nodes, lambda_matricies):
 
     return K, F, kept_rows
 
+# returns bar's stress given displacement and cosine vector
+# sigma = E/L*[C -C]*[d1; d2] (1x6)*(6x1) = 1x1
 def getStress(bar):
     n_dim = len(bar.end_nodes[0].location)
     d = np.zeros((n_dim * 2, 1))
@@ -206,6 +202,7 @@ def main():
     if len(sys.argv) < 2:
         raise Exception("Did not provide input file")
     
+    # Read from input
     filename = sys.argv[1]
     f = open(filename, 'r')
     s = f.readline()
@@ -230,18 +227,20 @@ def main():
             s = f.readline()
         s = s.strip()
     
+    # Encapsulate node objects within bar objects
     connectBarNodes(bars, nodes)
 
+    # converting from dictionary to list
+    # Replaces ids of nodes and bars to match with index
     nodes = [node for node in nodes.values()]
     bars = [bar for bar in bars.values()]
-
     for i in range(len(nodes)):
         nodes[i].id = i
 
     for i in range(len(bars)):
         bars[i].id = i
 
-
+    # Finds lambda matrix of each bar and saves within list 
     lambda_matricies = []
     for bar in bars:
         setCosines(bar)
@@ -251,12 +250,15 @@ def main():
 
         lambda_matricies.append((bar.end_nodes[0].id, bar.end_nodes[1].id, new_lambda))
 
+    # Gets the K and F matricies and applies boundary conditions to them
     K, F, d_rows = getKF(nodes, lambda_matricies)
     K_bc, F_bc, d_rows = trimKF(K, F, d_rows)
-    print(K_bc, F_bc)
+    # print(K_bc, F_bc)
     d = np.linalg.solve(K_bc, F_bc)
     full_d = np.zeros((K.shape[0],1))
 
+    # Gets full displacement matrix with boundary conditions and 
+    # saves values to node objects
     d_idx = 0
     for i in range(len(nodes)):
         if d_idx >= len(d_rows):
@@ -268,28 +270,23 @@ def main():
                 d_idx += 1
                 if d_idx >= len(d_rows):
                     break
-    print(full_d)
+    # print(full_d)
+
+    # gets force at each node by multiplying K without boundary conditions with 
+    # full displacement vector
     full_f = np.matmul(K,full_d)
-    print(full_f)
     for i in range(len(nodes)):
         nodes[i].final_forces = full_f[3*i:3*i+3,0]
-    for bar in bars:
-        sigma = getStress(bar)
-        bar.stress = sigma
+
+    # Find bar's stress
+    for bar in bars: 
+        bar.stress = getStress(bar)
     
-    for bar in bars:
-        print(bar.stress)
+    # Prints nodes and bars
     for node in nodes:
         printNode(node)
-        # print(node.displacement)  
-
     for bar in bars:
         printBar(bar)
 
 
 main()
-
-
-
-# K = [lambda, -lambda,
-#      -lambda, lambda]
